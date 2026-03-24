@@ -1,0 +1,15 @@
+[package]
+name = "ssd1306-lite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# embassy-futures = "0.1"
+# embassy-sync = { version = "0.7.2", features = [] }
+# embassy-time = { version = "0.5.0", features = [] }
+embassy-futures = { path = "../embassy/embassy-futures" }
+embassy-sync = { path = "../embassy/embassy-sync", features = [] }
+embassy-time = { path = "../embassy/embassy-time", features = [] }
+embedded-graphics = { path = "../embedded-graphics" }
+panic-probe = { version = "1.0.0", features = [] }
+embedded-hal-async = "1.0.0"
