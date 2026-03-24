@@ -107,20 +107,23 @@ dependencies = [
 
 [[package]]
 name = "embedded-graphics"
-version = "0.8.1"
+version = "0.8.2"
+source = "git+https://github.com/naokiiwakami/embedded-graphics.git?tag=embedded-graphics-v0.8.2-fork#a61d6df460a1cf48ac3cef2f10bb04e653bda763"
 dependencies = [
  "az",
+ "byteorder",
  "embedded-graphics-core",
  "float-cmp",
- "integer-sqrt",
  "micromath",
 ]
 
 [[package]]
 name = "embedded-graphics-core"
-version = "0.4.0"
+version = "0.4.1"
+source = "git+https://github.com/naokiiwakami/embedded-graphics.git?tag=embedded-graphics-v0.8.2-fork#a61d6df460a1cf48ac3cef2f10bb04e653bda763"
 dependencies = [
  "az",
+ "byteorder",
 ]
 
 [[package]]
@@ -201,15 +204,6 @@ checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
 dependencies = [
  "hash32",
  "stable_deref_trait",
-]
-
-[[package]]
-name = "integer-sqrt"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "276ec31bcb4a9ee45f58bec6f9ec700ae4cf4f4f8f2fa7e06cb406bd5ffdd770"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
