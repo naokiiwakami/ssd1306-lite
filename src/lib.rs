@@ -7,6 +7,40 @@ use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 use embedded_hal_async::i2c::I2c;
 use panic_probe as _;
 
+pub const DISPLAY_SIZE_X: usize = 128;
+pub const DISPLAY_SIZE_Y: usize = 64;
+pub const PAGE_SIZE: usize = 128;
+pub const NUM_PAGES: usize = DISPLAY_SIZE_X * DISPLAY_SIZE_Y / 8 / PAGE_SIZE;
+
+static FONT_10X20_IMAGE: &[u8] = include_bytes!("../fonts/font_10x20.raw");
+static FONT_8X13_IMAGE: &[u8] = include_bytes!("../fonts/font_8x13.raw");
+static FONT_8X13_BOLD_IMAGE: &[u8] = include_bytes!("../fonts/font_8x13_bold.raw");
+static FONT_6X10_IMAGE: &[u8] = include_bytes!("../fonts/font_6x10.raw");
+
+static FONT_10X20: Font = Font {
+    image: FONT_10X20_IMAGE,
+    width: 10,
+    height: 20,
+};
+
+static FONT_8X13: Font = Font {
+    image: FONT_8X13_IMAGE,
+    width: 8,
+    height: 13,
+};
+
+static FONT_8X13_BOLD: Font = Font {
+    image: FONT_8X13_BOLD_IMAGE,
+    width: 8,
+    height: 13,
+};
+
+static FONT_6X10: Font = Font {
+    image: FONT_6X10_IMAGE,
+    width: 6,
+    height: 10,
+};
+
 /// Minimal SSD1306 driver with:
 /// - internal framebuffer
 /// - dirty page tracking
@@ -37,11 +71,6 @@ pub struct Ssd1306Lite<I2C> {
     dirty: [DirtyPage; 8],
 
     yield_interval: Duration,
-
-    font_large: Font,
-    font_medium: Font,
-    font_medium_bold: Font,
-    font_small: Font,
 }
 
 /// Supported font sizes.
@@ -75,30 +104,6 @@ where
     /// - I2C address defaults to `0x3C`
     /// - Yield interval defaults to 25µs
     pub fn new(i2c: I2C) -> Self {
-        let image_10x20 = include_bytes!("../fonts/font_10x20.raw");
-        let font_10x20 = Font {
-            image: image_10x20,
-            width: 10,
-            height: 20,
-        };
-        let image_8x13 = include_bytes!("../fonts/font_8x13.raw");
-        let font_8x13 = Font {
-            image: image_8x13,
-            width: 8,
-            height: 13,
-        };
-        let image_8x13_bold = include_bytes!("../fonts/font_8x13_bold.raw");
-        let font_8x13_bold = Font {
-            image: image_8x13_bold,
-            width: 8,
-            height: 13,
-        };
-        let image_6x10 = include_bytes!("../fonts/font_6x10.raw");
-        let font_6x10 = Font {
-            image: image_6x10,
-            width: 6,
-            height: 10,
-        };
         let dirty = [DirtyPage {
             min_col: 127,
             max_col: 0,
@@ -110,10 +115,6 @@ where
             framebuffer: [0u8; 1024],
             dirty,
             yield_interval: Duration::from_micros(25),
-            font_large: font_10x20,
-            font_medium: font_8x13,
-            font_medium_bold: font_8x13_bold,
-            font_small: font_6x10,
         }
     }
 
@@ -161,15 +162,15 @@ where
     ///
     /// This ignores dirty tracking and always updates all pages.
     pub async fn flush_full(&mut self) {
-        for page in 0..8 {
-            let base = page * 128;
+        for page in 0..NUM_PAGES {
+            let base = page * PAGE_SIZE;
 
             Self::write_commands(&mut self.i2c, self.addr, &[0xB0 + page as u8, 0x00, 0x10]).await;
 
             Self::write_data(
                 &mut self.i2c,
                 self.addr,
-                &self.framebuffer[base..base + 128],
+                &self.framebuffer[base..base + PAGE_SIZE],
             )
             .await;
         }
@@ -180,9 +181,9 @@ where
     /// Each page (8 vertical pixels) tracks min/max modified columns.
     /// Only those regions are transmitted over I2C.
     pub async fn flush(&mut self) {
-        let mut temp = [0u8; 128]; // one page max width
+        let mut temp = [0u8; PAGE_SIZE]; // one page max width
 
-        for page in 0..8 {
+        for page in 0..NUM_PAGES {
             // ---- Step 1: copy dirty info out ----
             let (dirty, start, end) = {
                 let d = &self.dirty[page];
@@ -193,11 +194,11 @@ where
                 continue;
             }
 
-            let start = start.min(127);
-            let end = end.min(127);
+            let start = start.min((PAGE_SIZE - 1) as u8);
+            let end = end.min((PAGE_SIZE - 1) as u8);
 
             let len = (end - start + 1) as usize;
-            let base = page * 128;
+            let base = page * DISPLAY_SIZE_X;
 
             // ---- Step 2: copy framebuffer slice (break borrow) ----
             temp[..len]
@@ -223,7 +224,7 @@ where
             // ---- Step 5: clear dirty ----
             self.dirty[page] = DirtyPage {
                 dirty: false,
-                min_col: 127,
+                min_col: (PAGE_SIZE - 1) as u8,
                 max_col: 0,
             };
         }
@@ -243,7 +244,7 @@ where
 
         self.dirty = [DirtyPage {
             min_col: 0,
-            max_col: 127,
+            max_col: (PAGE_SIZE - 1) as u8,
             dirty: true,
         }; 8];
     }
@@ -260,6 +261,9 @@ where
 
         for Pixel(point, color) in styled.pixels() {
             let (index, bit) = self.map_pixel_mut(point.x as u32, point.y as u32);
+            if index >= self.framebuffer.len() {
+                continue;
+            }
             match color {
                 BinaryColor::On => {
                     self.framebuffer[index] |= 1 << bit;
@@ -279,24 +283,30 @@ where
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        self.framebuffer[index] |= 1 << bit;
+        if index < self.framebuffer.len() {
+            self.framebuffer[index] |= 1 << bit;
+        }
     }
 
     /// Sets a pixel to OFF.
     #[inline]
     pub fn unset_pixel(&mut self, x: u32, y: u32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        self.framebuffer[index] &= !(1 << bit);
+        if index < self.framebuffer.len() {
+            self.framebuffer[index] &= !(1 << bit);
+        }
     }
 
     /// Updates a pixel with a boolean value.
     #[inline]
     pub fn update_pixel(&mut self, x: u32, y: u32, color: bool) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        if color {
-            self.framebuffer[index] |= 1 << bit;
-        } else {
-            self.framebuffer[index] &= !(1 << bit);
+        if index < self.framebuffer.len() {
+            if color {
+                self.framebuffer[index] |= 1 << bit;
+            } else {
+                self.framebuffer[index] &= !(1 << bit);
+            }
         }
     }
 
@@ -380,19 +390,10 @@ where
         ch: char,
         x0: usize,
         y0: usize,
-        font_size: &FontSize,
+        font: &Font,
         color: BinaryColor,
         last_yield: &mut Instant,
     ) -> usize {
-        let font = match font_size {
-            FontSize::Large => &self.font_large,
-            FontSize::Medium => match color {
-                BinaryColor::On => &self.font_medium,
-                BinaryColor::Off => &self.font_medium_bold,
-            },
-            FontSize::Small => &self.font_small,
-        };
-
         let width = font.width;
         let height = font.height;
         let image = font.image;
@@ -426,16 +427,12 @@ where
                     BinaryColor::On => {
                         if value == 1 {
                             self.framebuffer[data_index] |= 1 << data_bit;
-                        } else {
-                            self.framebuffer[data_index] &= !(1 << data_bit);
                         }
                     }
                     BinaryColor::Off => {
                         // Inverted rendering
                         if value == 1 {
                             self.framebuffer[data_index] &= !(1 << data_bit);
-                        } else {
-                            self.framebuffer[data_index] |= 1 << data_bit;
                         }
                     }
                 }
@@ -453,19 +450,63 @@ where
     ///
     /// Rendering proceeds left-to-right.
     /// This method yields periodically.
-    pub async fn draw_string(
-        &mut self,
-        s: &str,
-        mut x: usize,
-        y: usize,
-        font_size: FontSize,
-        color: BinaryColor,
-    ) {
+    pub async fn draw_string(&mut self, text: &str, text_box: TextBox, font_size: FontSize) {
         let mut last_yield = Instant::now();
-        for ch in s.chars() {
+
+        let color = text_box.fg_color;
+
+        let font = match font_size {
+            FontSize::Large => &FONT_10X20,
+            FontSize::Medium => match color {
+                BinaryColor::On => &FONT_8X13,
+                BinaryColor::Off => &FONT_8X13_BOLD,
+            },
+            FontSize::Small => &FONT_6X10,
+        };
+
+        let mut x = Self::position_text(text, &text_box, &font);
+        let y = Self::v_position_text(&text_box, &font);
+
+        for ch in text.chars() {
             x = self
-                .draw_char_at(ch, x, y, &font_size, color, &mut last_yield)
+                .draw_char_at(ch, x, y, &font, color, &mut last_yield)
                 .await;
+        }
+    }
+
+    fn position_text(string: &str, text_box: &TextBox, font: &Font) -> usize {
+        match text_box.alignment {
+            Alignment::Left => text_box.top_left_x,
+            _ => {
+                let text_width = font.width * string.len();
+                let mut margin = if text_box.width > text_width {
+                    text_box.width - text_width
+                } else {
+                    0
+                };
+                if matches!(text_box.alignment, Alignment::Center) {
+                    margin /= 2;
+                }
+                text_box.top_left_x + margin
+            }
+        }
+    }
+
+    fn v_position_text(text_box: &TextBox, font: &Font) -> usize {
+        match text_box.v_alignment {
+            VAlignment::Top => text_box.top_left_y,
+            _ => {
+                let text_height = font.height;
+                let mut margin = if text_box.height > text_height {
+                    text_box.height - text_height
+                } else {
+                    0
+                };
+                if matches!(text_box.v_alignment, VAlignment::Center) {
+                    margin /= 2;
+                }
+                text_box.top_left_y + margin
+            }
         }
     }
 
@@ -477,7 +518,7 @@ where
         entry.min_col = entry.min_col.min(x as u8);
         entry.max_col = entry.max_col.max(x as u8);
 
-        let index = x as usize + 128 * page;
+        let index = x as usize + DISPLAY_SIZE_X * page;
         let bit = y % 8;
 
         (index, bit as usize)
@@ -499,7 +540,7 @@ where
 
         let mut offset = 0;
         while offset < data.len() {
-            let chunk = (data.len() - offset).min(128);
+            let chunk = (data.len() - offset).min(DISPLAY_SIZE_X);
 
             buf[1..1 + chunk].copy_from_slice(&data[offset..offset + chunk]);
 
@@ -638,4 +679,119 @@ fn in_arc(dx: i32, dy: i32, sx: i32, sy: i32, ex: i32, ey: i32) -> bool {
 #[inline]
 fn cross(ax: i32, ay: i32, bx: i32, by: i32) -> i32 {
     ax * by - ay * bx
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error(&'static str);
+
+impl Error {
+    pub const fn new(msg: &'static str) -> Self {
+        Self(msg)
+    }
+
+    pub const fn msg(&self) -> &'static str {
+        self.0
+    }
+}
+
+#[non_exhaustive]
+#[derive(Clone)]
+pub struct TextBox {
+    pub top_left_x: usize,
+    pub top_left_y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub fg_color: BinaryColor,
+    pub alignment: Alignment,
+    pub v_alignment: VAlignment,
+}
+
+#[derive(Clone)]
+pub enum Alignment {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Clone)]
+pub enum VAlignment {
+    Top,
+    Center,
+    Bottom,
+}
+
+#[non_exhaustive]
+pub struct TextBoxBuilder {
+    text_box: TextBox,
+}
+
+impl TextBox {
+    pub fn simple(top_left_x: usize, top_left_y: usize, fg_color: BinaryColor) -> Self {
+        let top_left_x = top_left_x % DISPLAY_SIZE_X;
+        let top_left_y = top_left_y % DISPLAY_SIZE_Y;
+
+        Self {
+            top_left_x,
+            top_left_y,
+            width: DISPLAY_SIZE_X - top_left_x,
+            height: DISPLAY_SIZE_Y - top_left_y,
+            fg_color,
+            alignment: Alignment::Left,
+            v_alignment: VAlignment::Top,
+        }
+    }
+
+    pub fn builder(top_left_x: usize, top_left_y: usize) -> TextBoxBuilder {
+        TextBoxBuilder {
+            text_box: TextBox::simple(top_left_x, top_left_y, BinaryColor::On),
+        }
+    }
+
+    pub fn top_center() -> TextBoxBuilder {
+        let mut builder = Self::builder(0, 0);
+        builder.align(Alignment::Center);
+        builder
+    }
+
+    pub fn center() -> TextBoxBuilder {
+        let mut builder = Self::builder(0, 0);
+        builder.align(Alignment::Center).valign(VAlignment::Center);
+        builder
+    }
+
+    #[inline]
+    pub fn is_color_reverse(&self) -> bool {
+        matches!(self.fg_color, BinaryColor::Off)
+    }
+}
+
+impl TextBoxBuilder {
+    pub fn fg_color(&mut self, color: BinaryColor) -> &mut Self {
+        self.text_box.fg_color = color;
+        self
+    }
+
+    pub fn width(&mut self, width: usize) -> &mut Self {
+        self.text_box.width = width.min(DISPLAY_SIZE_X - self.text_box.top_left_x);
+        self
+    }
+
+    pub fn height(&mut self, height: usize) -> &mut Self {
+        self.text_box.height = height.min(DISPLAY_SIZE_Y - self.text_box.top_left_y);
+        self
+    }
+
+    pub fn align(&mut self, align: Alignment) -> &mut Self {
+        self.text_box.alignment = align;
+        self
+    }
+
+    pub fn valign(&mut self, align: VAlignment) -> &mut Self {
+        self.text_box.v_alignment = align;
+        self
+    }
+
+    pub fn build(&mut self) -> TextBox {
+        self.text_box.clone()
+    }
 }
