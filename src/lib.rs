@@ -261,9 +261,6 @@ where
 
         for Pixel(point, color) in styled.pixels() {
             let (index, bit) = self.map_pixel_mut(point.x as u32, point.y as u32);
-            if index >= self.framebuffer.len() {
-                continue;
-            }
             match color {
                 BinaryColor::On => {
                     self.framebuffer[index] |= 1 << bit;
@@ -283,30 +280,24 @@ where
     #[inline]
     pub fn set_pixel(&mut self, x: u32, y: u32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        if index < self.framebuffer.len() {
-            self.framebuffer[index] |= 1 << bit;
-        }
+        self.framebuffer[index] |= 1 << bit;
     }
 
     /// Sets a pixel to OFF.
     #[inline]
     pub fn unset_pixel(&mut self, x: u32, y: u32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        if index < self.framebuffer.len() {
-            self.framebuffer[index] &= !(1 << bit);
-        }
+        self.framebuffer[index] &= !(1 << bit);
     }
 
     /// Updates a pixel with a boolean value.
     #[inline]
     pub fn update_pixel(&mut self, x: u32, y: u32, color: bool) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
-        if index < self.framebuffer.len() {
-            if color {
-                self.framebuffer[index] |= 1 << bit;
-            } else {
-                self.framebuffer[index] &= !(1 << bit);
-            }
+        if color {
+            self.framebuffer[index] |= 1 << bit;
+        } else {
+            self.framebuffer[index] &= !(1 << bit);
         }
     }
 
@@ -510,7 +501,11 @@ where
         }
     }
 
-    fn map_pixel_mut(&mut self, x: u32, y: u32) -> (usize, usize) {
+    fn map_pixel_mut(&mut self, mut x: u32, mut y: u32) -> (usize, usize) {
+        // limit the position within the display window
+        x &= (DISPLAY_SIZE_X - 1) as u32;
+        y &= (DISPLAY_SIZE_Y - 1) as u32;
+
         let page = (y / 8) as usize;
 
         let entry = &mut self.dirty[page];
