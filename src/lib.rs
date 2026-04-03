@@ -1,11 +1,17 @@
 #![no_std]
 
+mod spline;
+
 use embassy_futures::yield_now;
 use embassy_time::{Duration, Instant};
-use embedded_graphics::primitives::{PrimitiveStyle, Styled, StyledPixels};
+use embedded_graphics::primitives::{
+    Circle, Line, PrimitiveStyle, Rectangle, Styled, StyledPixels, Triangle,
+};
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 use embedded_hal_async::i2c::I2c;
 use panic_probe as _;
+
+use crate::spline::{SplineRasterIter, compute_steps};
 
 pub const DISPLAY_SIZE_X: usize = 128;
 pub const DISPLAY_SIZE_Y: usize = 64;
@@ -276,23 +282,83 @@ where
         }
     }
 
+    #[inline(always)]
+    pub async fn draw_line(
+        &mut self,
+        start: (i32, i32),
+        end: (i32, i32),
+        style: PrimitiveStyle<BinaryColor>,
+    ) {
+        self.draw_styled(
+            Line::new(Point::new(start.0, start.1), Point::new(end.0, end.1)).into_styled(style),
+        )
+        .await;
+    }
+
+    #[inline(always)]
+    pub async fn draw_circle(
+        &mut self,
+        top_left: (i32, i32),
+        diameter: u32,
+        style: PrimitiveStyle<BinaryColor>,
+    ) {
+        self.draw_styled(
+            Circle::new(Point::new(top_left.0, top_left.1), diameter).into_styled(style),
+        )
+        .await;
+    }
+
+    #[inline(always)]
+    pub async fn draw_rectangle(
+        &mut self,
+        top_left: (i32, i32),
+        width: u32,
+        height: u32,
+        style: PrimitiveStyle<BinaryColor>,
+    ) {
+        self.draw_styled(
+            Rectangle::new(Point::new(top_left.0, top_left.1), Size::new(width, height))
+                .into_styled(style),
+        )
+        .await;
+    }
+
+    #[inline(always)]
+    pub async fn draw_triangle(
+        &mut self,
+        vertex1: (i32, i32),
+        vertex2: (i32, i32),
+        vertex3: (i32, i32),
+        style: PrimitiveStyle<BinaryColor>,
+    ) {
+        self.draw_styled(
+            Triangle::new(
+                Point::new(vertex1.0, vertex1.1),
+                Point::new(vertex2.0, vertex2.1),
+                Point::new(vertex3.0, vertex3.1),
+            )
+            .into_styled(style),
+        )
+        .await;
+    }
+
     /// Sets a pixel to ON
     #[inline]
-    pub fn set_pixel(&mut self, x: u32, y: u32) {
+    pub fn set_pixel(&mut self, x: i32, y: i32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
         self.framebuffer[index] |= 1 << bit;
     }
 
     /// Sets a pixel to OFF.
     #[inline]
-    pub fn unset_pixel(&mut self, x: u32, y: u32) {
+    pub fn unset_pixel(&mut self, x: i32, y: i32) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
         self.framebuffer[index] &= !(1 << bit);
     }
 
     /// Updates a pixel with a boolean value.
     #[inline]
-    pub fn update_pixel(&mut self, x: u32, y: u32, color: bool) {
+    pub fn update_pixel(&mut self, x: i32, y: i32, color: bool) {
         let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
         if color {
             self.framebuffer[index] |= 1 << bit;
@@ -306,8 +372,8 @@ where
     /// This method yields periodically.
     pub async fn draw_bitmap(
         &mut self,
-        top_left_x: u32,
-        top_left_y: u32,
+        top_left_x: i32,
+        top_left_y: i32,
         bitmap: &[u8],
         width: u32,
         height: u32,
@@ -341,8 +407,8 @@ where
 
     async fn draw_bitmap_core<F>(
         &mut self,
-        top_left_x: u32,
-        top_left_y: u32,
+        top_left_x: i32,
+        top_left_y: i32,
         bitmap: &[u8],
         width: u32,
         height: u32,
@@ -355,16 +421,16 @@ where
         let byte_width = (width as usize + 7) / 8;
         for j in 0..height as usize {
             let mut byte = 0u8;
-            let y = top_left_y + j as u32;
+            let y = top_left_y + j as i32;
             for i in 0..width {
-                let x = top_left_x + i;
+                let x = top_left_x + i as i32;
                 if (i & 7) != 0 {
                     byte <<= 1;
                 } else {
                     byte = bitmap[y as usize * byte_width + i as usize / 8];
                 }
 
-                let (index, bit) = self.map_pixel_mut(x, y);
+                let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
                 if (byte & 0x80) != 0 {
                     plot(&mut self.framebuffer[index], bit);
                 }
@@ -598,13 +664,63 @@ where
 
         for (px, py) in candidates {
             if in_arc(px, py, sx, sy, ex, ey) {
-                self.update_pixel((cx + px) as u32, (cy + py) as u32, color);
+                self.update_pixel(cx + px, cy + py, color);
             }
             if last_yield.elapsed() > self.yield_interval {
                 yield_now().await;
                 *last_yield = Instant::now();
             }
         }
+    }
+
+    pub async fn draw_spline<'a>(
+        &mut self,
+        points: &'a [(i32, i32)],
+        steps_per_segment: u32,
+        color: BinaryColor,
+    ) {
+        match color {
+            BinaryColor::On => {
+                self.draw_spline_core(points, steps_per_segment, |data, bit| *data |= 1 << bit)
+                    .await
+            }
+            BinaryColor::Off => {
+                self.draw_spline_core(points, steps_per_segment, |data, bit| *data &= !(1 << bit))
+                    .await
+            }
+        }
+    }
+
+    async fn draw_spline_core<'a, F>(
+        &mut self,
+        points: &'a [(i32, i32)],
+        steps_per_segment: u32,
+        plot: F,
+    ) where
+        F: Fn(&mut u8, usize),
+    {
+        let mut last_yield = Instant::now();
+        let iter = SplineRasterIter::new(points, steps_per_segment);
+        for (x, y) in iter {
+            let (index, bit) = self.map_pixel_mut(x as u32, y as u32);
+            plot(&mut self.framebuffer[index], bit);
+            if last_yield.elapsed() > self.yield_interval {
+                yield_now().await;
+                last_yield = Instant::now();
+            }
+        }
+    }
+
+    pub async fn draw_3p_curve(
+        &mut self,
+        p0: (i32, i32),
+        p1: (i32, i32),
+        p2: (i32, i32),
+        color: BinaryColor,
+    ) {
+        let steps = compute_steps(p0, p1, p2);
+        let points = [p0, p1, p2];
+        self.draw_spline(&points, steps, color).await;
     }
 }
 
