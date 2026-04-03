@@ -567,73 +567,54 @@ where
         }
     }
 
-    fn map_pixel_mut(&mut self, mut x: u32, mut y: u32) -> (usize, usize) {
-        // limit the position within the display window
-        x &= (DISPLAY_SIZE_X - 1) as u32;
-        y &= (DISPLAY_SIZE_Y - 1) as u32;
-
-        let page = (y / 8) as usize;
-
-        let entry = &mut self.dirty[page];
-        entry.dirty = true;
-        entry.min_col = entry.min_col.min(x as u8);
-        entry.max_col = entry.max_col.max(x as u8);
-
-        let index = x as usize + DISPLAY_SIZE_X * page;
-        let bit = y % 8;
-
-        (index, bit as usize)
-    }
-
-    async fn write_commands(i2c: &mut I2C, addr: u8, cmds: &[u8]) {
-        let mut buf = [0u8; 32];
-        buf[0] = 0x00; // command
-
-        let len = cmds.len();
-        buf[1..1 + len].copy_from_slice(cmds);
-
-        i2c.write(addr, &buf[..1 + len]).await.unwrap();
-    }
-
-    async fn write_data(i2c: &mut I2C, addr: u8, data: &[u8]) {
-        let mut buf = [0u8; 129];
-        buf[0] = 0x40;
-
-        let mut offset = 0;
-        while offset < data.len() {
-            let chunk = (data.len() - offset).min(DISPLAY_SIZE_X);
-
-            buf[1..1 + chunk].copy_from_slice(&data[offset..offset + chunk]);
-
-            i2c.write(addr, &buf[..1 + chunk]).await.unwrap();
-
-            offset += chunk;
-        }
-    }
+    // Methods to draw arc //////////////////////////////////////////////////
 
     /// draws an arc
     pub async fn draw_arc(
         &mut self,
         cx: i32,
         cy: i32,
-        radius: i32,
+        radius: u32,
         start: Angle,
         end: Angle,
-        color: bool,
+        color: BinaryColor,
     ) {
+        match color {
+            BinaryColor::On => {
+                self.draw_arc_core(cx, cy, radius, start, end, |data, bit| *data |= 1 << bit)
+                    .await
+            }
+            BinaryColor::Off => {
+                self.draw_arc_core(cx, cy, radius, start, end, |data, bit| *data &= !(1 << bit))
+                    .await
+            }
+        }
+    }
+
+    async fn draw_arc_core<F>(
+        &mut self,
+        cx: i32,
+        cy: i32,
+        radius: u32,
+        start: Angle,
+        end: Angle,
+        plot: F,
+    ) where
+        F: Fn(&mut u8, usize),
+    {
         let (sx, sy) = (start.x, start.y);
         let (ex, ey) = (end.x, end.y);
 
-        let mut x = radius;
+        let mut x = radius as i32;
         let mut y = 0;
         let mut err = 1 - x;
 
         let mut last_yield = Instant::now();
         while x >= y {
             // 8 octants
-            self.plot_arc_points(cx, cy, x, y, sx, sy, ex, ey, color, &mut last_yield)
+            self.plot_arc_points(cx, cy, x, y, sx, sy, ex, ey, &plot, &mut last_yield)
                 .await;
-            self.plot_arc_points(cx, cy, y, x, sx, sy, ex, ey, color, &mut last_yield)
+            self.plot_arc_points(cx, cy, y, x, sx, sy, ex, ey, &plot, &mut last_yield)
                 .await;
 
             y += 1;
@@ -647,7 +628,7 @@ where
         }
     }
 
-    async fn plot_arc_points(
+    async fn plot_arc_points<F>(
         &mut self,
         cx: i32,
         cy: i32,
@@ -657,14 +638,17 @@ where
         sy: i32,
         ex: i32,
         ey: i32,
-        color: bool,
+        plot: &F,
         last_yield: &mut Instant,
-    ) {
+    ) where
+        F: Fn(&mut u8, usize),
+    {
         let candidates = [(dx, dy), (-dx, dy), (dx, -dy), (-dx, -dy)];
 
         for (px, py) in candidates {
             if in_arc(px, py, sx, sy, ex, ey) {
-                self.update_pixel(cx + px, cy + py, color);
+                let (index, bit) = self.map_pixel_mut((cx + px) as u32, (cy + py) as u32);
+                plot(&mut self.framebuffer[index], bit);
             }
             if last_yield.elapsed() > self.yield_interval {
                 yield_now().await;
@@ -672,6 +656,8 @@ where
             }
         }
     }
+
+    // Methods to draw spline ////////////////////////////////////////////
 
     pub async fn draw_spline<'a>(
         &mut self,
@@ -721,6 +707,52 @@ where
         let steps = compute_steps(p0, p1, p2);
         let points = [p0, p1, p2];
         self.draw_spline(&points, steps, color).await;
+    }
+
+    // Utilities ////////////////////////////////////////////////////////
+
+    fn map_pixel_mut(&mut self, mut x: u32, mut y: u32) -> (usize, usize) {
+        // limit the position within the display window
+        x &= (DISPLAY_SIZE_X - 1) as u32;
+        y &= (DISPLAY_SIZE_Y - 1) as u32;
+
+        let page = (y / 8) as usize;
+
+        let entry = &mut self.dirty[page];
+        entry.dirty = true;
+        entry.min_col = entry.min_col.min(x as u8);
+        entry.max_col = entry.max_col.max(x as u8);
+
+        let index = x as usize + DISPLAY_SIZE_X * page;
+        let bit = y % 8;
+
+        (index, bit as usize)
+    }
+
+    async fn write_commands(i2c: &mut I2C, addr: u8, cmds: &[u8]) {
+        let mut buf = [0u8; 32];
+        buf[0] = 0x00; // command
+
+        let len = cmds.len();
+        buf[1..1 + len].copy_from_slice(cmds);
+
+        i2c.write(addr, &buf[..1 + len]).await.unwrap();
+    }
+
+    async fn write_data(i2c: &mut I2C, addr: u8, data: &[u8]) {
+        let mut buf = [0u8; 129];
+        buf[0] = 0x40;
+
+        let mut offset = 0;
+        while offset < data.len() {
+            let chunk = (data.len() - offset).min(DISPLAY_SIZE_X);
+
+            buf[1..1 + chunk].copy_from_slice(&data[offset..offset + chunk]);
+
+            i2c.write(addr, &buf[..1 + chunk]).await.unwrap();
+
+            offset += chunk;
+        }
     }
 }
 
